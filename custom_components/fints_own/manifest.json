@@ -1,0 +1,19 @@
+{
+  "domain": "fints_own",
+  "name": "FinTS (Custom) / Hanseatic Bank (Online)",
+  "version": "1.2.0",
+  "codeowners": [
+    "@SaulGoodman1337"
+  ],
+  "documentation": "https://github.com/SaulGoodman1337/sparkasse_hanseatic_homeassistant",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "loggers": [
+    "fints",
+    "mt_940",
+    "sepaxml"
+  ],
+  "requirements": [
+    "fints==4.2.4"
+  ]
+}
