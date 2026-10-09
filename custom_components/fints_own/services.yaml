@@ -1,0 +1,28 @@
+hanseatic_reauthenticate:
+  name: Hanseatic Bank Anmeldung erneuern
+  description: Startet einen neuen Online-Login und fordert ggf. die Freigabe in der Hanseatic-Bank-App an.
+  fields:
+    name:
+      name: Name
+      description: Name des Hanseatic-Eintrags in configuration.yaml (z. B. Visa).
+      required: true
+      example: Visa
+      selector:
+        text:
+hanseatic_submit_otp:
+  name: Hanseatic Bank SMS-TAN bestätigen
+  description: Schliesst eine wartende SMS-TAN-Anmeldung ab und ruft den Kontostand online ab.
+  fields:
+    name:
+      name: Name
+      required: true
+      example: Visa
+      selector:
+        text:
+    otp:
+      name: SMS-TAN
+      description: Code aus der SMS der Hanseatic Bank.
+      required: true
+      example: "123456"
+      selector:
+        text:
