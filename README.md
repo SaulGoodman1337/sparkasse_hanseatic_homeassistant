@@ -14,6 +14,24 @@ Home-Assistant-Custom-Integration für den **automatischen Online-Abruf** von Ko
 3. Home Assistant neu starten. Die Hanseatic-Anbindung führt bei der ersten Aktualisierung einen Online-Login aus. Falls eine App-Freigabe erforderlich ist, die Hanseatic-Bank-App öffnen und den Login freigeben.
 4. Die beiden Sensoren `Hanseatic Visa Saldo` und `Hanseatic Visa Onlinestatus` kontrollieren.
 
+### Fehler: `provider` / `login_id` ungültig, Sparkassen-Zugangsdaten erforderlich
+
+Wenn bei `provider: hanseatic` die Felder `bank_identification_number`, `username`, `pin` und `url` als Pflichtfelder verlangt werden, **läuft noch die alte Sparkassen-Version** der Integration. Die neue Konfiguration ist dann nicht das Problem.
+
+1. Im Home-Assistant-Konfigurationsverzeichnis muss **genau dieser Pfad** vorhanden sein: `/config/custom_components/fints_own/sensor.py`. Beim manuellen Kopieren die **Dateien aus** `custom_components/fints_own/` des Repositories direkt in diesen Zielordner kopieren – **nicht** das gesamte Repository als weiteren Unterordner einfügen.
+2. **Alle Dateien** der Integration gemeinsam ersetzen, insbesondere `sensor.py`, `hanseatic.py` und `manifest.json`. Eine alte `sensor.py` darf nicht übrigbleiben.
+3. Die installierte `sensor.py` muss `SCHEMA_HANSEATIC_USER` enthalten, `hanseatic.py` muss existieren und die `manifest.json` muss Version `1.2.0` (oder neuer) nennen. In Home Assistant mit dem Terminal-Add-on beispielsweise:
+
+   ```sh
+   grep -n 'SCHEMA_HANSEATIC_USER' /config/custom_components/fints_own/sensor.py
+   grep -n '"version"' /config/custom_components/fints_own/manifest.json
+   ls -l /config/custom_components/fints_own/hanseatic.py
+   ```
+
+4. **Home Assistant komplett neu starten** (nicht nur YAML-Konfiguration neu laden), damit Python die neue Integration lädt. Danach erst die Konfiguration prüfen. Bei einer HACS-Installation sicherstellen, dass das Repository tatsächlich in `/config/custom_components/fints_own/` aktualisiert wurde.
+
+**Nicht** die Hanseatic-Zugangsdaten durch Sparkassen-Felder ersetzen oder Zugangsdaten in einem GitHub-Issue veröffentlichen.
+
 ## Beispiel: Sparkasse + Hanseatic
 
 ```yaml

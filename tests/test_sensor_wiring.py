@@ -6,6 +6,11 @@ import sys
 import types
 import unittest
 
+try:
+    import voluptuous as real_vol
+except ImportError:
+    real_vol = None
+
 ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "fints_own"
 
 
@@ -17,7 +22,7 @@ def stub_module(name):
 
 def load_sensor_with_stubs():
     names = (
-        "voluptuous", "fints", "fints.client", "fints.exceptions", "fints.models",
+        "fints", "fints.client", "fints.exceptions", "fints.models",
         "homeassistant", "homeassistant.components", "homeassistant.components.sensor",
         "homeassistant.const", "homeassistant.core", "homeassistant.helpers",
         "homeassistant.helpers.entity_platform", "homeassistant.helpers.typing",
@@ -26,24 +31,29 @@ def load_sensor_with_stubs():
     for name in names:
         stub_module(name)
 
-    vol = sys.modules["voluptuous"]
+    if real_vol is None:
+        # The offline wiring tests can run without installed third-party packages.
+        # CI installs real Voluptuous to exercise Home Assistant's config schema.
+        vol = stub_module("voluptuous")
 
-    class MockSchema:
-        def __init__(self, *args, **kwargs):
-            pass
-        def extend(self, *args):
-            return self
-        def __call__(self, value):
-            return value
+        class MockSchema:
+            def __init__(self, *args, **kwargs):
+                pass
+            def extend(self, *args):
+                return self
+            def __call__(self, value):
+                return value
 
-    vol.Schema = MockSchema
-    vol.Required = lambda name, **kwargs: name
-    vol.Optional = lambda name, **kwargs: name
-    vol.All = lambda *args: (lambda v: v)
-    vol.Coerce = lambda cls: (lambda v: cls(v))
-    vol.Range = lambda **kwargs: (lambda v: v)
-    vol.In = lambda values: (lambda v: v)
-    vol.Invalid = ValueError
+        vol.Schema = MockSchema
+        vol.Required = lambda name, **kwargs: name
+        vol.Optional = lambda name, **kwargs: name
+        vol.All = lambda *args: (lambda v: v)
+        vol.Coerce = lambda cls: (lambda v: cls(v))
+        vol.Range = lambda **kwargs: (lambda v: v)
+        vol.In = lambda values: (lambda v: v)
+        vol.Invalid = ValueError
+    else:
+        vol = real_vol
 
     fints_client = sys.modules["fints.client"]
     fints_client.FinTS3PinTanClient = type("FinTS3PinTanClient", (), {})
@@ -59,7 +69,10 @@ def load_sensor_with_stubs():
         def schedule_update_ha_state(self, **kwargs):
             pass
     module.SensorEntity = FakeSensorEntity
-    module.PLATFORM_SCHEMA = MockSchema()
+    module.PLATFORM_SCHEMA = (
+        vol.Schema({vol.Optional("platform"): str}, extra=vol.ALLOW_EXTRA)
+        if real_vol is not None else MockSchema()
+    )
 
     const = sys.modules["homeassistant.const"]
     const.CONF_NAME = "name"
@@ -189,6 +202,39 @@ class TestHAWiring(unittest.TestCase):
             ServiceCall({"name": "Visa"})
         )
         self.assertEqual(manager.client.calls[-1], ("fetch", True))
+
+    @unittest.skipIf(real_vol is None, "Real Voluptuous not installed")
+    def test_schema_accepts_hanseatic_and_sparkasse_together(self):
+        validated = self.module.PLATFORM_SCHEMA({
+            "platform": "fints_own",
+            "users": [
+                {"name": "Sparkasse", "bank_identification_number": "10000000",
+                 "username": "spk-user", "pin": "1234", "url": "https://bank.invalid/fints"},
+                {"name": "Visa", "provider": "hanseatic", "login_id": "1234567890",
+                 "password": "secret", "auto_reauthenticate": True,
+                 "sca_timeout_seconds": 90, "reauth_retry_hours": 12},
+            ],
+        })
+        self.assertEqual(validated["users"][0]["provider"], "fints")
+        self.assertEqual(validated["users"][1]["provider"], "hanseatic")
+        self.assertEqual(validated["users"][1]["login_id"], "1234567890")
+
+    @unittest.skipIf(real_vol is None, "Real Voluptuous not installed")
+    def test_schema_accepts_hanseatic_without_sparkasse_fields(self):
+        validated = self.module.PLATFORM_SCHEMA({
+            "platform": "fints_own",
+            "users": [{"name": "Visa", "provider": "hanseatic", "login_id": "1234567890",
+                       "password": "secret"}],
+        })
+        self.assertEqual(validated["users"][0]["provider"], "hanseatic")
+
+    @unittest.skipIf(real_vol is None, "Real Voluptuous not installed")
+    def test_schema_still_rejects_incomplete_sparkasse_config(self):
+        with self.assertRaises(real_vol.Invalid):
+            self.module.PLATFORM_SCHEMA({
+                "platform": "fints_own",
+                "users": [{"name": "Sparkasse", "username": "spk-user"}],
+            })
 
     def test_sparkasse_and_hanseatic_in_one_config(self):
         self.module.setup_platform(
