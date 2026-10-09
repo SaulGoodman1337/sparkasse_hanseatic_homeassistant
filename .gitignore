@@ -1,0 +1,35 @@
+# Sensitive FinTS runtime state
+.fints_own/
+client_state_*.bin
+*.bin
+
+# Local bank data (avoid committing account information)
+hanseatic.json
+hanseatic_transactions.csv
+
+# Secrets
+secrets.yaml
+*.secret
+*.secrets
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Logs/backups
+*.log
+*.bak
+*.backup
+*.zip
+*.tar
+*.tar.gz
