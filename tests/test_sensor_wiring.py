@@ -130,6 +130,15 @@ class FakeBankClient:
         self.session_storage_error = False
         self.last_authenticated_at = "2026-10-09T12:00:00+00:00"
         self.last_successful_sync = "2026-10-09T12:01:00+00:00"
+        self.access_token_expires_at = "2026-10-09T13:00:00+00:00"
+        self.access_token_expiry_source = "expires_in"
+        self.refresh_token_offered = False
+        self.last_token_rejected_at = "2026-10-09T11:30:00+00:00"
+        self.last_token_rejection_http_status = 401
+        self.last_login_attempt_at = "2026-10-09T12:00:00+00:00"
+        self.last_login_reason = "bank_rejected_access_token"
+        self.last_login_outcome = "success"
+        self.last_login_http_status = None
     def fetch(self, *, force_reauthenticate=False):
         self.calls.append(("fetch", force_reauthenticate))
         from custom_components.fints_own.hanseatic import HanseaticSnapshot
@@ -256,6 +265,13 @@ class TestHAWiring(unittest.TestCase):
         self.assertTrue(attrs["access_token_cached"])
         self.assertTrue(attrs["device_token_cached"])
         self.assertFalse(attrs["session_storage_error"])
+        self.assertEqual(attrs["access_token_expires_at"], "2026-10-09T13:00:00+00:00")
+        self.assertEqual(attrs["access_token_expiry_source"], "expires_in")
+        self.assertFalse(attrs["refresh_token_offered"])
+        self.assertEqual(attrs["last_token_rejection_http_status"], 401)
+        self.assertEqual(attrs["last_login_reason"], "bank_rejected_access_token")
+        self.assertEqual(attrs["last_login_outcome"], "success")
+        self.assertIsNone(attrs["last_login_http_status"])
         self.assertNotIn("access_token", attrs)
         self.assertNotIn("device_token", attrs)
 

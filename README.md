@@ -20,7 +20,7 @@ Wenn bei `provider: hanseatic` die Felder `bank_identification_number`, `usernam
 
 1. Im Home-Assistant-Konfigurationsverzeichnis muss **genau dieser Pfad** vorhanden sein: `/config/custom_components/fints_own/sensor.py`. Beim manuellen Kopieren die **Dateien aus** `custom_components/fints_own/` des Repositories direkt in diesen Zielordner kopieren – **nicht** das gesamte Repository als weiteren Unterordner einfügen.
 2. **Alle Dateien** der Integration gemeinsam ersetzen, insbesondere `sensor.py`, `hanseatic.py` und `manifest.json`. Eine alte `sensor.py` darf nicht übrigbleiben.
-3. Die installierte `sensor.py` muss `SCHEMA_HANSEATIC_USER` enthalten, `hanseatic.py` muss existieren und die `manifest.json` muss Version `1.2.1` (oder neuer) nennen. In Home Assistant mit dem Terminal-Add-on beispielsweise:
+3. Die installierte `sensor.py` muss `SCHEMA_HANSEATIC_USER` enthalten, `hanseatic.py` muss existieren und die `manifest.json` muss Version `1.2.2` (oder neuer) nennen. In Home Assistant mit dem Terminal-Add-on beispielsweise:
 
    ```sh
    grep -n 'SCHEMA_HANSEATIC_USER' /config/custom_components/fints_own/sensor.py
@@ -97,6 +97,15 @@ In **Entwicklerwerkzeuge → Zustände** den Sensor `sensor.hanseatic_visa_onlin
 | `session_storage_error` | Das Lesen oder Speichern der lokalen Sitzungsdatei ist fehlgeschlagen |
 | `last_authenticated_at` | Letzter erfolgreicher **Bank-Login** (wird gespeichert) |
 | `last_successful_sync` | Letzter erfolgreicher **Saldoabruf** (wird gespeichert) |
+| `access_token_expires_at` | Angegebene Ablaufzeit aus JWT-`exp` oder API-`expires_in`, sonst `null` |
+| `access_token_expiry_source` | Herkunft der Ablaufzeit: `jwt_exp`, `expires_in` oder `unknown` |
+| `last_token_rejected_at` | Letzter Zeitpunkt, an dem die Bank einen gespeicherten Access-Token abgewiesen hat |
+| `last_token_rejection_http_status` | Zugehoeriger HTTP-Status (`401`/`403`), sonst `null` |
+| `last_login_attempt_at` | Letzter tatsaechlich gestarteter neuer Login (nicht jeder Saldoabruf) |
+| `last_login_reason` | `forced_reauthentication`, `bank_rejected_access_token` oder `no_access_token` |
+| `last_login_outcome` | `started`, `success`, `sms_otp_required`, `approval_required` oder `error` |
+| `last_login_http_status` | HTTP-Status eines fehlgeschlagenen neuen Loginversuchs, sonst `null` |
+| `refresh_token_offered` | Ob eine erfolgreiche Token-Antwort einen Refresh-Token **angeboten** hat; der Token selbst wird weder gespeichert noch verwendet |
 
 Mit dem Home-Assistant-Terminal kann die Datei **ohne Anzeigen des geheimen Inhalts** geprüft werden:
 
@@ -105,6 +114,20 @@ ls -l /config/.fints_own/hanseatic_session_*.json
 ```
 
 Die Datei muss nach erfolgreichem Login existieren; regulär haben die Dateien Rechte `-rw-------`. **Den Inhalt niemals teilen oder in GitHub hochladen:** Er enthält Bank-Zugriffstokens. `session_restored: true` beweist nur, dass die Datei geladen wurde – **nicht**, dass der Bankserver den Token noch akzeptiert. Eine abgelaufene oder vom Server widerrufene Sitzung kann nicht künstlich verlängert werden.
+
+### Warum kommen wiederholt App-Freigaben? (Diagnose ab v1.2.2)
+
+Nach der naechsten erneuten App-Anforderung die oben genannten Statusattribute pruefen:
+
+- **`last_login_reason: bank_rejected_access_token`** und `last_token_rejection_http_status: 401` oder `403`: Die Bank hat den **zwischengespeicherten Access-Token** bei der Kontoabfrage abgelehnt. Ob dies am Token-Ablauf oder einer anderen serverseitigen Regel liegt, ist damit noch nicht bewiesen. Mit `access_token_expires_at` vergleichen, sofern vorhanden.
+- **`last_login_reason: forced_reauthentication`**: Ein Aufruf mit `force_reauthenticate=True` wurde ausgeloest. Im normalen Home-Assistant-Betrieb erfolgt das ueber `fints_own.hanseatic_reauthenticate`. Bitte alle Automationen, Skripte und Dashboard-Buttons auf diesen Dienst pruefen, besonders `automation.fints`. Ein Ausloeser wird aus Datenschutzgruenden nicht erfasst.
+- **`last_login_reason: no_access_token`**: Zum Zeitpunkt des letzten neuen Logins lag kein Access-Token vor (z. B. erster Start oder vorheriges Ablehnen).
+- **`access_token_expiry_source: unknown`**: Die Bank hat keine maschinenlesbare Ablaufzeit bereitgestellt, die hier ermittelt werden konnte. Es wird **keine** Laufzeit geraten.
+- **`refresh_token_offered: true`**: Die Bank hat ein gleichnamiges Feld zurueckgegeben. Das bedeutet nicht, dass unsere derzeitige nichtoffizielle Anbindung dessen Nutzung unterstuetzt.
+
+Die Zeitangaben sind UTC/ISO-8601. Die JWT-Ablaufzeit dient **nur zur Diagnose**; die Bank entscheidet ueber die tatsaechliche Gueltigkeit. Die Integration nutzt vorhandene Bearer-Tokens unveraendert weiter und umgeht keine Sicherheitsfreigaben.
+
+**Wichtig:** Weder den Inhalt der Sitzungsdatei noch Passwort, SMS-TAN, Access-Token oder Geraeteschluessel in Issues oder Chats veroeffentlichen. Die sichtbaren diagnostischen Attribute enthalten keine Tokenwerte.
 
 ## Sensoren
 

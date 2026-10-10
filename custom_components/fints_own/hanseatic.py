@@ -252,6 +252,16 @@ class HanseaticBankClient:
         self.last_authenticated_at: str | None = None
         self.session_restored = False
         self.session_storage_error = False
+        # Sanitized diagnostics only; never expose tokens, login ID or password.
+        self.access_token_expires_at: str | None = None
+        self.access_token_expiry_source = "unknown"
+        self.refresh_token_offered: bool | None = None
+        self.last_token_rejected_at: str | None = None
+        self.last_token_rejection_http_status: int | None = None
+        self.last_login_attempt_at: str | None = None
+        self.last_login_reason: str | None = None
+        self.last_login_outcome: str | None = None
+        self.last_login_http_status: int | None = None
         self._load_state()
 
     @property
@@ -285,6 +295,47 @@ class HanseaticBankClient:
             pass
         return None
 
+    def _utc_now(self) -> str:
+        return datetime.fromtimestamp(self._clock(), tz=timezone.utc).isoformat(timespec="seconds")
+
+    def _expected_token_expiry(
+        self, token: str, response: dict[str, Any],
+    ) -> tuple[str | None, str]:
+        """Diagnostic hint only: does not validate tokens or bypass bank SCA."""
+        claims = _jwt_payload(token)
+        exp = claims.get("exp")
+        if isinstance(exp, (int, float, str)) and not isinstance(exp, bool):
+            try:
+                timestamp = float(exp)
+                if 946684800 <= timestamp <= 4102444800:  # years 2000..2100
+                    return (
+                        datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat(timespec="seconds"),
+                        "jwt_exp",
+                    )
+            except (TypeError, ValueError, OverflowError):
+                pass
+        ttl = response.get("expires_in")
+        if isinstance(ttl, (int, float, str)) and not isinstance(ttl, bool):
+            try:
+                seconds = float(ttl)
+                if 0 < seconds <= 31536000:  # at most one year; avoid implausible values
+                    return (
+                        datetime.fromtimestamp(self._clock() + seconds, tz=timezone.utc).isoformat(timespec="seconds"),
+                        "expires_in",
+                    )
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return None, "unknown"
+
+    def _record_token_rejection(self, status: int) -> None:
+        """Remember a bank HTTP rejection without logging any credential/token."""
+        self.last_token_rejected_at = self._utc_now()
+        self.last_token_rejection_http_status = status
+        self._access_token = None
+        # Keep expiry hints for diagnosing early server-side revocation.
+        self._save_state()
+        _LOGGER.info("Hanseatic cached bearer rejected by bank (HTTP %s)", status)
+
     def _load_state(self) -> None:
         try:
             if not self._state_file.is_file():
@@ -301,6 +352,29 @@ class HanseaticBankClient:
             self._retry_after = float(state.get("retry_after") or 0)
             self.last_successful_sync = self._valid_timestamp(state.get("last_successful_sync"))
             self.last_authenticated_at = self._valid_timestamp(state.get("last_authenticated_at"))
+            self.access_token_expires_at = self._valid_timestamp(state.get("access_token_expires_at"))
+            expiry_source = state.get("access_token_expiry_source")
+            if expiry_source in ("jwt_exp", "expires_in"):
+                self.access_token_expiry_source = expiry_source
+            elif self._access_token:
+                # Backwards compatibility with existing v1.2.1 session files.
+                self.access_token_expires_at, self.access_token_expiry_source = self._expected_token_expiry(
+                    self._access_token, {}
+                )
+            offered = state.get("refresh_token_offered")
+            self.refresh_token_offered = offered if isinstance(offered, bool) else None
+            self.last_token_rejected_at = self._valid_timestamp(state.get("last_token_rejected_at"))
+            status = state.get("last_token_rejection_http_status")
+            self.last_token_rejection_http_status = status if status in (401, 403) else None
+            self.last_login_attempt_at = self._valid_timestamp(state.get("last_login_attempt_at"))
+            reason = state.get("last_login_reason")
+            if reason in ("forced_reauthentication", "bank_rejected_access_token", "no_access_token"):
+                self.last_login_reason = reason
+            outcome = state.get("last_login_outcome")
+            if outcome in ("started", "success", "sms_otp_required", "approval_required", "error"):
+                self.last_login_outcome = outcome
+            login_status = state.get("last_login_http_status")
+            self.last_login_http_status = login_status if type(login_status) is int and 100 <= login_status <= 599 else None
             self.session_restored = self.has_cached_access_token or self.has_saved_device_token
             _LOGGER.info(
                 "Hanseatic session restored from disk: bearer=%s, registered_device=%s",
@@ -318,6 +392,15 @@ class HanseaticBankClient:
             "retry_after": self._retry_after,
             "last_successful_sync": self.last_successful_sync,
             "last_authenticated_at": self.last_authenticated_at,
+            "access_token_expires_at": self.access_token_expires_at,
+            "access_token_expiry_source": self.access_token_expiry_source,
+            "refresh_token_offered": self.refresh_token_offered,
+            "last_token_rejected_at": self.last_token_rejected_at,
+            "last_token_rejection_http_status": self.last_token_rejection_http_status,
+            "last_login_attempt_at": self.last_login_attempt_at,
+            "last_login_reason": self.last_login_reason,
+            "last_login_outcome": self.last_login_outcome,
+            "last_login_http_status": self.last_login_http_status,
         }
         temp_path: str | None = None
         try:
@@ -358,13 +441,18 @@ class HanseaticBankClient:
             headers["devicetoken"] = device_token
         return self._requester(method, path, payload, headers, form)
 
-    def _save_access_token(self, token: str) -> None:
+    def _save_access_token(self, token: str, response: dict[str, Any]) -> None:
         if not isinstance(token, str) or not token:
             raise HanseaticError("Hanseatic Bank did not provide an access token")
         self._access_token = token
-        self.last_authenticated_at = datetime.fromtimestamp(
-            self._clock(), tz=timezone.utc
-        ).isoformat(timespec="seconds")
+        self.access_token_expires_at, self.access_token_expiry_source = self._expected_token_expiry(
+            token, response
+        )
+        # Existence flag only: the refresh token (if any) is NEVER stored or exposed.
+        self.refresh_token_offered = bool(response.get("refresh_token"))
+        self.last_authenticated_at = self._utc_now()
+        self.last_login_outcome = "success"
+        self.last_login_http_status = None
         self._retry_after = 0
         self._save_state()
 
@@ -396,7 +484,7 @@ class HanseaticBankClient:
             response = self._call("POST", "/token", values, basic=True, form=True)
 
         if response.get("access_token"):
-            self._save_access_token(response["access_token"])
+            self._save_access_token(response["access_token"], response)
             return
         claims = _jwt_payload(response.get("id_token", ""))
         sca_id = claims.get("sca_id")
@@ -453,7 +541,7 @@ class HanseaticBankClient:
                     raise HanseaticError("Bank did not issue an access token after app approval")
                 if device_token:
                     self._device_token = device_token
-                self._save_access_token(token)
+                self._save_access_token(token, exchange)
                 return
             if status not in ("open", "pending", "accepted"):
                 raise HanseaticApprovalRequired("App-Freigabe abgelehnt oder abgelaufen")
@@ -478,7 +566,7 @@ class HanseaticBankClient:
         if not token:
             raise HanseaticError("SMS-TAN abgelehnt oder abgelaufen")
         self._pending_sms = None
-        self._save_access_token(token)
+        self._save_access_token(token, response)
 
     def _customer_data(self) -> dict[str, Any]:
         if not self._access_token:
@@ -607,14 +695,15 @@ class HanseaticBankClient:
 
     def fetch(self, *, force_reauthenticate: bool = False) -> HanseaticSnapshot:
         """Poll bank directly. Reuse existing bearer token; log in when necessary."""
+        token_was_rejected = False
         if self._access_token and not force_reauthenticate:
             try:
                 return self._mark_successful_fetch(self._read_snapshot())
             except HanseaticHttpError as exc:
                 if exc.status not in (401, 403):
                     raise
-                self._access_token = None
-                self._save_state()
+                self._record_token_rejection(exc.status)
+                token_was_rejected = True
             except HanseaticError:
                 # Non-auth errors must not trigger a new SCA push.
                 raise
@@ -628,12 +717,32 @@ class HanseaticBankClient:
             raise HanseaticApprovalRequired("Keine gültige Sitzung; fints_own.hanseatic_reauthenticate aufrufen")
         if self._retry_after > self._clock() and not force_reauthenticate:
             raise HanseaticApprovalRequired("Freigabe erforderlich; erneuter Anmeldeversuch nach " + (self.retry_after or ""))
+        # Record why the request will generate a NEW login (and possibly an SCA push).
+        self.last_login_attempt_at = self._utc_now()
+        self.last_login_reason = (
+            "forced_reauthentication" if force_reauthenticate else
+            "bank_rejected_access_token" if token_was_rejected else
+            "no_access_token"
+        )
+        self.last_login_outcome = "started"
+        self.last_login_http_status = None
+        self._save_state()
+        _LOGGER.info("Hanseatic login attempt: reason=%s", self.last_login_reason)
         try:
             self._start_login()
         except HanseaticOtpRequired:
+            self.last_login_outcome = "sms_otp_required"
+            self._save_state()
             # SMS can be entered via the HA service, no retry cooldown now.
             raise
-        except (HanseaticError, ValueError):
+        except HanseaticApprovalRequired:
+            self.last_login_outcome = "approval_required"
+            self._retry_after = self._clock() + 3600 * self.reauth_retry_hours
+            self._save_state()
+            raise
+        except (HanseaticError, ValueError) as exc:
+            self.last_login_outcome = "error"
+            self.last_login_http_status = exc.status if isinstance(exc, HanseaticHttpError) else None
             self._retry_after = self._clock() + 3600 * self.reauth_retry_hours
             self._save_state()
             raise
@@ -641,7 +750,7 @@ class HanseaticBankClient:
             return self._mark_successful_fetch(self._read_snapshot())
         except HanseaticHttpError as exc:
             if exc.status in (401, 403):
-                self._access_token = None
+                self._record_token_rejection(exc.status)
                 self._retry_after = self._clock() + 3600 * self.reauth_retry_hours
                 self._save_state()
             raise

@@ -175,6 +175,120 @@ class HanseaticOnlineTests(unittest.TestCase):
         self.assertTrue(client.has_cached_access_token)
         self.assertFalse(list(Path(self.tmp.name).glob("hanseatic_session_*.json")))
 
+    def test_diagnostics_opaque_token_expiry_and_persisted_reason(self):
+        stub = StubTransport([
+            (path_is("/token"), {"access_token": "opaque-secret", "expires_in": 3600,
+                                  "refresh_token": "must-never-be-stored"}),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("12.5")),
+        ])
+        client = self.client(stub, clock=lambda: 1800000000)
+        self.assertEqual(client.fetch().balance, 12.5)
+        self.assertEqual(client.last_login_reason, "no_access_token")
+        self.assertEqual(client.last_login_outcome, "success")
+        self.assertEqual(client.access_token_expiry_source, "expires_in")
+        self.assertTrue(client.refresh_token_offered)
+        self.assertEqual(client.last_login_attempt_at, client.last_authenticated_at)
+        state = next(Path(self.tmp.name).glob("hanseatic_session_*.json"))
+        self.assertNotIn("must-never-be-stored", state.read_text("utf-8"))
+        self.assertNotIn("test-password", state.read_text("utf-8"))
+        saved_expiry = client.access_token_expires_at
+        restored = self.client(StubTransport([
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("16.0")),
+        ]), clock=lambda: 1800000300)
+        self.assertTrue(restored.session_restored)
+        self.assertEqual(restored.access_token_expires_at, saved_expiry)
+        self.assertEqual(restored.last_login_reason, "no_access_token")
+        self.assertTrue(restored.refresh_token_offered)
+        self.assertEqual(restored.fetch().balance, 16.0)
+        self.assertEqual(restored.last_login_attempt_at, client.last_login_attempt_at)
+
+    def test_diagnostics_jwt_expiry_takes_priority_over_token_response(self):
+        exp = 1800007200
+        claim = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        bank_token = "header." + claim + ".signature"
+        stub = StubTransport([
+            (path_is("/token"), {"access_token": bank_token, "expires_in": 3600}),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("22")),
+        ])
+        client = self.client(stub, clock=lambda: 1800000000)
+        self.assertEqual(client.fetch().balance, 22)
+        self.assertEqual(client.access_token_expiry_source, "jwt_exp")
+        self.assertEqual(client.access_token_expires_at,
+                         "2027-01-15T10:00:00+00:00")
+        self.assertFalse(client.refresh_token_offered)
+        self.assertNotIn(bank_token, str({
+            "expires_at": client.access_token_expires_at,
+            "reason": client.last_login_reason,
+        }))
+
+    def test_rejected_cached_token_preserves_sanitized_diagnostics(self):
+        stub = StubTransport([
+            (path_is("/token"), {"access_token": "sensitive-bearer", "expires_in": 3600}),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("10")),
+        ])
+        client = self.client(stub, clock=lambda: 1800000000)
+        self.assertEqual(client.fetch().balance, 10)
+        client._clock = lambda: 1800000123
+        failing = StubTransport([
+            (path_is("/customerinfo/1.0/initCustomer"), hb.HanseaticHttpError(401)),
+            (path_is("/token"), hb.HanseaticHttpError(503)),
+        ])
+        client._requester = failing
+        with self.assertRaises(hb.HanseaticHttpError) as caught:
+            client.fetch()
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual([x[1] for x in failing.calls],
+                         ["/customerinfo/1.0/initCustomer", "/token"])
+        self.assertFalse(client.has_cached_access_token)
+        self.assertEqual(client.last_token_rejection_http_status, 401)
+        self.assertEqual(client.last_login_reason, "bank_rejected_access_token")
+        self.assertEqual(client.last_login_outcome, "error")
+        self.assertEqual(client.last_login_http_status, 503)
+        self.assertIsNotNone(client.last_token_rejected_at)
+        restored = self.client(StubTransport([]), clock=lambda: 1800000200)
+        self.assertEqual(restored.last_token_rejection_http_status, 401)
+        self.assertEqual(restored.last_login_reason, "bank_rejected_access_token")
+        self.assertEqual(restored.last_login_outcome, "error")
+        self.assertEqual(restored.last_login_http_status, 503)
+        self.assertEqual(restored.access_token_expiry_source, "expires_in")
+        self.assertEqual(restored.access_token_expires_at, client.access_token_expires_at)
+
+    def test_forced_reauthentication_recorded_separately_from_bank_rejection(self):
+        stub = StubTransport([
+            (path_is("/token"), {"access_token": "first-bearer"}),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("100")),
+        ])
+        client = self.client(stub)
+        client.fetch()
+        other = StubTransport([
+            (path_is("/token"), {"access_token": "second-bearer"}),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("200")),
+        ])
+        client._requester = other
+        self.assertEqual(client.fetch(force_reauthenticate=True).balance, 200)
+        self.assertEqual(other.calls[0][1], "/token")
+        self.assertEqual(client.last_login_reason, "forced_reauthentication")
+        self.assertEqual(client.last_login_outcome, "success")
+        self.assertIsNone(client.last_login_http_status)
+        self.assertIsNone(client.last_token_rejection_http_status)
+
+    def test_bank_http_500_does_not_trigger_extra_login(self):
+        stub = StubTransport([
+            (path_is("/token"), {"access_token": "existing-bearer"}),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("100")),
+        ])
+        client = self.client(stub)
+        client.fetch()
+        other = StubTransport([
+            (path_is("/customerinfo/1.0/initCustomer"), hb.HanseaticHttpError(500)),
+        ])
+        client._requester = other
+        with self.assertRaises(hb.HanseaticHttpError):
+            client.fetch()
+        self.assertTrue(client.has_cached_access_token)
+        self.assertIsNone(client.last_token_rejection_http_status)
+        self.assertEqual([c[1] for c in other.calls], ["/customerinfo/1.0/initCustomer"])
+
     def test_app_push_sca_completes_and_saves_device_token(self):
         attempts = [
             {"id_token": id_token()},

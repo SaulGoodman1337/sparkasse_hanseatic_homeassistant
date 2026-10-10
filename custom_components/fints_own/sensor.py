@@ -1752,4 +1752,13 @@ class HanseaticOnlineStatusSensor(SensorEntity):
             "device_token_cached": getattr(self._manager.client, "has_saved_device_token", False),
             "session_storage_error": getattr(self._manager.client, "session_storage_error", False),
             "last_authenticated_at": getattr(self._manager.client, "last_authenticated_at", None),
+            "access_token_expires_at": getattr(self._manager.client, "access_token_expires_at", None),
+            "access_token_expiry_source": getattr(self._manager.client, "access_token_expiry_source", "unknown"),
+            "refresh_token_offered": getattr(self._manager.client, "refresh_token_offered", None),
+            "last_token_rejected_at": getattr(self._manager.client, "last_token_rejected_at", None),
+            "last_token_rejection_http_status": getattr(self._manager.client, "last_token_rejection_http_status", None),
+            "last_login_attempt_at": getattr(self._manager.client, "last_login_attempt_at", None),
+            "last_login_reason": getattr(self._manager.client, "last_login_reason", None),
+            "last_login_outcome": getattr(self._manager.client, "last_login_outcome", None),
+            "last_login_http_status": getattr(self._manager.client, "last_login_http_status", None),
         }
