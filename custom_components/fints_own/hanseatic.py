@@ -246,7 +246,22 @@ class HanseaticBankClient:
         self._device_token: str | None = None
         self._retry_after: float = 0
         self._pending_sms: tuple[str, float] | None = None
+        # Persist only bank-issued tokens and non-secret synchronization metadata.
+        # The password is never written to the session file.
+        self.last_successful_sync: str | None = None
+        self.last_authenticated_at: str | None = None
+        self.session_restored = False
+        self.session_storage_error = False
         self._load_state()
+
+    @property
+    def has_cached_access_token(self) -> bool:
+        """Whether a bearer token is cached (not proof of server validity)."""
+        return bool(self._access_token)
+
+    @property
+    def has_saved_device_token(self) -> bool:
+        return bool(self._device_token)
 
     @property
     def waiting_for_sms(self) -> bool:
@@ -258,40 +273,76 @@ class HanseaticBankClient:
             return None
         return datetime.fromtimestamp(self._retry_after, tz=timezone.utc).isoformat(timespec="seconds")
 
+    @staticmethod
+    def _valid_timestamp(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is not None:
+                return parsed.isoformat(timespec="seconds")
+        except ValueError:
+            pass
+        return None
+
     def _load_state(self) -> None:
         try:
             if not self._state_file.is_file():
                 return
             state = json.loads(self._state_file.read_text("utf-8"))
             if not isinstance(state, dict):
-                return
+                raise ValueError("Unexpected session data format")
             token = state.get("access_token")
-            if isinstance(token, str):
+            if isinstance(token, str) and token:
                 self._access_token = token
             device = state.get("device_token")
-            if isinstance(device, str):
+            if isinstance(device, str) and device:
                 self._device_token = device
             self._retry_after = float(state.get("retry_after") or 0)
+            self.last_successful_sync = self._valid_timestamp(state.get("last_successful_sync"))
+            self.last_authenticated_at = self._valid_timestamp(state.get("last_authenticated_at"))
+            self.session_restored = self.has_cached_access_token or self.has_saved_device_token
+            _LOGGER.info(
+                "Hanseatic session restored from disk: bearer=%s, registered_device=%s",
+                self.has_cached_access_token, self.has_saved_device_token,
+            )
         except (OSError, ValueError, TypeError):
+            self.session_storage_error = True
             _LOGGER.warning("Could not load saved Hanseatic session; new approval may be needed")
 
     def _save_state(self) -> None:
         folder = self._state_file.parent
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         data = {
             "access_token": self._access_token,
             "device_token": self._device_token,
             "retry_after": self._retry_after,
+            "last_successful_sync": self.last_successful_sync,
+            "last_authenticated_at": self.last_authenticated_at,
         }
-        descriptor, temp_path = tempfile.mkstemp(prefix="hanseatic_", suffix=".tmp", dir=folder)
+        temp_path: str | None = None
         try:
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            descriptor, temp_path = tempfile.mkstemp(prefix="hanseatic_", suffix=".tmp", dir=folder)
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 os.fchmod(handle.fileno(), 0o600)
                 json.dump(data, handle, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temp_path, self._state_file)
+            self.session_storage_error = False
+            _LOGGER.debug("Saved Hanseatic bearer/device session state (tokens not logged)")
+        except OSError as exc:
+            # Keep the in-memory session usable but flag that a restart may need SCA.
+            self.session_storage_error = True
+            _LOGGER.error("Could not persist Hanseatic session (%s); restart may require a new login", type(exc).__name__)
         finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
+            if temp_path is not None:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    _LOGGER.warning("Could not remove temporary Hanseatic session file")
 
     def _call(
         self, method: str, path: str, payload: dict[str, Any] | None = None,
@@ -311,8 +362,18 @@ class HanseaticBankClient:
         if not isinstance(token, str) or not token:
             raise HanseaticError("Hanseatic Bank did not provide an access token")
         self._access_token = token
+        self.last_authenticated_at = datetime.fromtimestamp(
+            self._clock(), tz=timezone.utc
+        ).isoformat(timespec="seconds")
         self._retry_after = 0
         self._save_state()
+
+    def _mark_successful_fetch(self, snapshot: HanseaticSnapshot) -> HanseaticSnapshot:
+        self.last_successful_sync = datetime.fromtimestamp(
+            self._clock(), tz=timezone.utc
+        ).isoformat(timespec="seconds")
+        self._save_state()
+        return snapshot
 
     def _start_login(self) -> None:
         values = {
@@ -323,10 +384,13 @@ class HanseaticBankClient:
         if self._device_token:
             try:
                 response = self._call("POST", "/token", values, basic=True, form=True, device_token=self._device_token)
-            except HanseaticError:
+            except HanseaticHttpError as exc:
+                if exc.status not in (401, 403):
+                    # A server/network error does not invalidate a registered device.
+                    raise
                 self._device_token = None
                 self._save_state()
-                # A rejected device token can require a normal login.
+                # Only an authentication rejection can justify removing the key.
                 response = self._call("POST", "/token", values, basic=True, form=True)
         else:
             response = self._call("POST", "/token", values, basic=True, form=True)
@@ -545,7 +609,7 @@ class HanseaticBankClient:
         """Poll bank directly. Reuse existing bearer token; log in when necessary."""
         if self._access_token and not force_reauthenticate:
             try:
-                return self._read_snapshot()
+                return self._mark_successful_fetch(self._read_snapshot())
             except HanseaticHttpError as exc:
                 if exc.status not in (401, 403):
                     raise
@@ -574,7 +638,7 @@ class HanseaticBankClient:
             self._save_state()
             raise
         try:
-            return self._read_snapshot()
+            return self._mark_successful_fetch(self._read_snapshot())
         except HanseaticHttpError as exc:
             if exc.status in (401, 403):
                 self._access_token = None

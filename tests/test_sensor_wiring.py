@@ -124,6 +124,12 @@ class FakeBankClient:
         self.waiting_for_sms = False
         self.calls = []
         self.balance = 18.3
+        self.session_restored = True
+        self.has_cached_access_token = True
+        self.has_saved_device_token = True
+        self.session_storage_error = False
+        self.last_authenticated_at = "2026-10-09T12:00:00+00:00"
+        self.last_successful_sync = "2026-10-09T12:01:00+00:00"
     def fetch(self, *, force_reauthenticate=False):
         self.calls.append(("fetch", force_reauthenticate))
         from custom_components.fints_own.hanseatic import HanseaticSnapshot
@@ -235,6 +241,23 @@ class TestHAWiring(unittest.TestCase):
                 "platform": "fints_own",
                 "users": [{"name": "Sparkasse", "username": "spk-user"}],
             })
+
+    def test_status_reports_persisted_session_without_exposing_tokens(self):
+        self.module.setup_platform(
+            self.hass,
+            {"users": [{"name": "Visa", "provider": "hanseatic", "login_id": "1234567890", "password": "dummy"}]},
+            self.add_entities,
+        )
+        status = self.entities[3]
+        attrs = status.extra_state_attributes
+        self.assertEqual(attrs["last_successful_sync"], "2026-10-09T12:01:00+00:00")
+        self.assertEqual(attrs["last_authenticated_at"], "2026-10-09T12:00:00+00:00")
+        self.assertTrue(attrs["session_restored"])
+        self.assertTrue(attrs["access_token_cached"])
+        self.assertTrue(attrs["device_token_cached"])
+        self.assertFalse(attrs["session_storage_error"])
+        self.assertNotIn("access_token", attrs)
+        self.assertNotIn("device_token", attrs)
 
     def test_sparkasse_and_hanseatic_in_one_config(self):
         self.module.setup_platform(

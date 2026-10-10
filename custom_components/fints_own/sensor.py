@@ -1560,7 +1560,7 @@ class HanseaticBankSensorManager:
         self.client = client
         self.transaction_days = client.transaction_days
         self.snapshot: HanseaticSnapshot | None = None
-        self.last_successful_sync: str | None = None
+        self.last_successful_sync: str | None = getattr(client, "last_successful_sync", None)
         self.last_error: str | None = None
         self.last_status: str = "not_updated"
         self._lock = Lock()
@@ -1580,7 +1580,7 @@ class HanseaticBankSensorManager:
         with self._lock:
             try:
                 self.snapshot = self.client.fetch(force_reauthenticate=force_reauthenticate)
-                self.last_successful_sync = _now_iso()
+                self.last_successful_sync = getattr(self.client, "last_successful_sync", None) or _now_iso()
                 self.last_status = "success"
                 self.last_error = None
             except HanseaticOtpRequired as exc:
@@ -1641,6 +1641,11 @@ class HanseaticBalanceSensor(SensorEntity):
             "last_successful_sync": self._manager.last_successful_sync,
             "waiting_for_sms": self._manager.client.waiting_for_sms,
             "retry_after": self._manager.client.retry_after,
+            "session_restored": getattr(self._manager.client, "session_restored", False),
+            "access_token_cached": getattr(self._manager.client, "has_cached_access_token", False),
+            "device_token_cached": getattr(self._manager.client, "has_saved_device_token", False),
+            "session_storage_error": getattr(self._manager.client, "session_storage_error", False),
+            "last_authenticated_at": getattr(self._manager.client, "last_authenticated_at", None),
             "default_transaction_days": self._manager.transaction_days,
         }
         if snapshot is not None:
@@ -1742,4 +1747,9 @@ class HanseaticOnlineStatusSensor(SensorEntity):
             "last_error": self._manager.last_error,
             "waiting_for_sms": self._manager.client.waiting_for_sms,
             "retry_after": self._manager.client.retry_after,
+            "session_restored": getattr(self._manager.client, "session_restored", False),
+            "access_token_cached": getattr(self._manager.client, "has_cached_access_token", False),
+            "device_token_cached": getattr(self._manager.client, "has_saved_device_token", False),
+            "session_storage_error": getattr(self._manager.client, "session_storage_error", False),
+            "last_authenticated_at": getattr(self._manager.client, "last_authenticated_at", None),
         }

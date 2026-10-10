@@ -96,6 +96,85 @@ class HanseaticOnlineTests(unittest.TestCase):
         self.assertEqual(len(second.calls), 1)
         self.assertEqual(second.calls[0][3]["Authorization"], "Bearer cached-token")
 
+    def test_persisted_session_metadata_survives_restart(self):
+        first = StubTransport([
+            (path_is("/token"), {"access_token": "saved-token"}),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("12.34")),
+        ])
+        a = self.client(first, clock=lambda: 1800000000.0)
+        a._device_token = "saved-device"
+        self.assertEqual(a.fetch().balance, 12.34)
+        self.assertFalse(a.session_restored)
+        self.assertTrue(a.has_cached_access_token)
+        self.assertTrue(a.has_saved_device_token)
+        self.assertFalse(a.session_storage_error)
+        self.assertEqual(a.last_successful_sync, "2027-01-15T08:00:00+00:00")
+        self.assertEqual(a.last_authenticated_at, a.last_successful_sync)
+
+        state = next(Path(self.tmp.name).glob("hanseatic_session_*.json"))
+        saved = json.loads(state.read_text("utf-8"))
+        self.assertEqual(saved["last_successful_sync"], a.last_successful_sync)
+        self.assertEqual(saved["last_authenticated_at"], a.last_authenticated_at)
+        self.assertEqual(saved["device_token"], "saved-device")
+        self.assertEqual(stat.S_IMODE(os.stat(state).st_mode), 0o600)
+
+        second = StubTransport([
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response("55.5")),
+        ])
+        b = self.client(second, clock=lambda: 1800000300.0)
+        self.assertTrue(b.session_restored)
+        self.assertTrue(b.has_cached_access_token)
+        self.assertTrue(b.has_saved_device_token)
+        self.assertEqual(b.last_authenticated_at, "2027-01-15T08:00:00+00:00")
+        self.assertEqual(b.last_successful_sync, "2027-01-15T08:00:00+00:00")
+        self.assertEqual(b.fetch().balance, 55.5)
+        self.assertEqual(len(second.calls), 1)
+        self.assertEqual(second.calls[0][3]["Authorization"], "Bearer saved-token")
+        self.assertEqual(b.last_successful_sync, "2027-01-15T08:05:00+00:00")
+        self.assertEqual(b.last_authenticated_at, "2027-01-15T08:00:00+00:00")
+
+    def test_transient_login_failure_does_not_delete_saved_device_key(self):
+        stub = StubTransport([(path_is("/token"), hb.HanseaticHttpError(503))])
+        a = self.client(stub)
+        a._device_token = "registered-device"
+        a._save_state()
+        with self.assertRaises(hb.HanseaticHttpError):
+            a.fetch()
+        self.assertEqual([call[1] for call in stub.calls], ["/token"])
+        self.assertEqual(stub.calls[0][3]["devicetoken"], "registered-device")
+        b = self.client(StubTransport([]))
+        self.assertTrue(b.has_saved_device_token)
+        self.assertTrue(b.session_restored)
+        self.assertFalse(b.has_cached_access_token)
+        self.assertIsNotNone(b.retry_after)
+
+    def test_rejected_device_key_falls_back_only_on_auth_rejection(self):
+        stub = StubTransport([
+            (path_is("/token"), [hb.HanseaticHttpError(401), {"access_token": "new-session"}]),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response(15)),
+        ])
+        client = self.client(stub)
+        client._device_token = "old-device"
+        client._save_state()
+        self.assertEqual(client.fetch().balance, 15)
+        self.assertEqual([c[1] for c in stub.calls], ["/token", "/token", "/customerinfo/1.0/initCustomer"])
+        self.assertEqual(stub.calls[0][3]["devicetoken"], "old-device")
+        self.assertNotIn("devicetoken", stub.calls[1][3])
+        self.assertFalse(self.client(StubTransport([])).has_saved_device_token)
+
+    def test_failed_session_disk_write_is_reported_without_losing_balance(self):
+        from unittest.mock import patch
+        stub = StubTransport([
+            (path_is("/token"), {"access_token": "in-memory-token"}),
+            (path_is("/customerinfo/1.0/initCustomer"), customer_response(42)),
+        ])
+        client = self.client(stub)
+        with patch.object(hb.tempfile, "mkstemp", side_effect=PermissionError("not writable")):
+            self.assertEqual(client.fetch().balance, 42)
+        self.assertTrue(client.session_storage_error)
+        self.assertTrue(client.has_cached_access_token)
+        self.assertFalse(list(Path(self.tmp.name).glob("hanseatic_session_*.json")))
+
     def test_app_push_sca_completes_and_saves_device_token(self):
         attempts = [
             {"id_token": id_token()},

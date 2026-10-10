@@ -1,7 +1,7 @@
 {
   "domain": "fints_own",
   "name": "FinTS (Custom) / Hanseatic Bank (Online)",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "codeowners": [
     "@SaulGoodman1337"
   ],
